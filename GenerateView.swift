@@ -138,11 +138,6 @@ struct GenerateView: View {
         let n2 = negative.trimmingCharacters(in: .whitespacesAndNewlines)
         if !n2.isEmpty { neg.append(n2) }
 
-        if r18, let reason = AgeCheck.check(positive) {
-            alertMessage = "R18 モードでは生成できません：\(reason)"
-            return
-        }
-
         let seed: UInt32
         if let v = Int64(seedText.trimmingCharacters(in: .whitespaces)), v >= 0 {
             seed = UInt32(truncatingIfNeeded: v)
