@@ -16,10 +16,10 @@ on:
         options: [portrait-832x1216, square-1024, landscape-1216x832]
         default: portrait-832x1216
       precision:
-        description: "精度（fp16=最高画質 / 8bit=軽量）"
+        description: "形式（ios-6bit=iPhone向け推奨 / ios-8bit=iPhone向け高画質 / fp16=Mac向け）"
         type: choice
-        options: [fp16, 8bit]
-        default: fp16
+        options: [ios-6bit, ios-8bit, fp16]
+        default: ios-6bit
 
 permissions:
   contents: write
@@ -87,17 +87,25 @@ jobs:
             landscape-1216x832) LH=104; LW=152 ;;
             *)                  LH=128; LW=128 ;;
           esac
-          EXTRA=""
-          if [ "$PRECISION" = "8bit" ]; then EXTRA="--quantize-nbits 8"; fi
+          case "$PRECISION" in
+            ios-6bit) ATTN=SPLIT_EINSUM; EXTRA="--chunk-unet --quantize-nbits 6" ;;
+            ios-8bit) ATTN=SPLIT_EINSUM; EXTRA="--chunk-unet --quantize-nbits 8" ;;
+            *)        ATTN=ORIGINAL;     EXTRA="" ;;
+          esac
           python -m python_coreml_stable_diffusion.torch2coreml \
             --model-version ./model_diffusers \
             --custom-vae-version madebyollin/sdxl-vae-fp16-fix \
             --xl-version \
             --convert-text-encoder --convert-unet --convert-vae-decoder \
-            --attention-implementation ORIGINAL \
+            --attention-implementation $ATTN \
             --latent-h $LH --latent-w $LW \
             $EXTRA \
             -o out
+          # 分割したUnetがあれば、分割前のUnetは不要なので消す
+          if ls -d out/*_unet_chunk1.mlpackage >/dev/null 2>&1; then
+            rm -rf out/*_unet.mlpackage
+          fi
+          echo "$ATTN" > out/attention.txt
           cp model_diffusers/tokenizer/vocab.json model_diffusers/tokenizer/merges.txt out/
           ls -la out
 
@@ -138,10 +146,14 @@ jobs:
           }
           comp _text_encoder TextEncoder
           comp _text_encoder_2 TextEncoder2
-          comp _unet Unet
+          if ls -d pkg/*_unet_chunk1.mlpackage >/dev/null 2>&1; then
+            comp _unet_chunk1 UnetChunk1
+            comp _unet_chunk2 UnetChunk2
+          else
+            comp _unet Unet
+          fi
           comp _vae_decoder VAEDecoder
-          cp pkg/vocab.json pkg/merges.txt model/
-          echo ORIGINAL > model/attention.txt
+          cp pkg/vocab.json pkg/merges.txt pkg/attention.txt model/
           du -sh model/*
 
       - name: Split files and publish release
