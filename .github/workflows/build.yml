@@ -1,30 +1,63 @@
 name: Build IPA
+
 on:
   workflow_dispatch:
   push:
     branches: [main]
+
 jobs:
   build:
     runs-on: macos-15
     steps:
       - uses: actions/checkout@v4
+
       - name: Arrange sources
         run: |
           mkdir -p Sources
           if ls *.swift >/dev/null 2>&1; then mv *.swift Sources/; fi
+
       - name: Install XcodeGen
         run: brew install xcodegen
+
       - name: Generate project
         run: xcodegen generate
+
       - name: Build (unsigned)
         run: |
-          xcodebuild -project GazouGen.xcodeproj -scheme GazouGen -configuration Release -sdk iphoneos -destination 'generic/platform=iOS' -derivedDataPath build CODE_SIGNING_ALLOWED=NO CODE_SIGNING_REQUIRED=NO CODE_SIGN_IDENTITY="" build
+          xcodebuild \
+            -project GazouGen.xcodeproj \
+            -scheme GazouGen \
+            -configuration Release \
+            -sdk iphoneos \
+            -destination 'generic/platform=iOS' \
+            -derivedDataPath build \
+            CODE_SIGNING_ALLOWED=NO CODE_SIGNING_REQUIRED=NO CODE_SIGN_IDENTITY="" \
+            build
+
       - name: Package IPA
         run: |
-          mkdir -p Payload
-          cp -R build/Build/Products/Release-iphoneos/GazouGen.app Payload/
-          zip -qr GazouGen.ipa Payload
+          set -e
+          APP=build/Build/Products/Release-iphoneos/GazouGen.app
+
+          # GazouGen.ipa : メモリ上限アップの設定（entitlement）を埋め込んだ版（おすすめ）
+          # 署名なしビルドだとこの設定が入らないため、仮署名で埋め込んでおく。
+          # Sideloadly は署名し直すときに、この設定を引き継ぐ。
+          mkdir -p mem/Payload
+          cp -R "$APP" mem/Payload/
+          codesign --force --sign - --timestamp=none \
+            --entitlements Sources/GazouGen.entitlements mem/Payload/GazouGen.app
+          codesign -d --entitlements - mem/Payload/GazouGen.app
+          (cd mem && zip -qr ../GazouGen.ipa Payload)
+
+          # GazouGen-basic.ipa : 設定なしの版（Sideloadlyでエラーが出たとき用）
+          mkdir -p basic/Payload
+          cp -R "$APP" basic/Payload/
+          (cd basic && zip -qr ../GazouGen-basic.ipa Payload)
+          ls -lh *.ipa
+
       - uses: actions/upload-artifact@v4
         with:
           name: GazouGen-ipa
-          path: GazouGen.ipa
+          path: |
+            GazouGen.ipa
+            GazouGen-basic.ipa

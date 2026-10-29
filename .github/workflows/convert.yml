@@ -98,11 +98,14 @@ jobs:
             landscape-1216x832) LH=104; LW=152 ;;
             *)                  LH=128; LW=128 ;;
           esac
+          # 注意: torch2coreml の --chunk-unet は「圧縮の前」に分割するため、
+          # 一緒に使うと分割後のUnetが圧縮されない。圧縮 → 分割 の順で別々に実行する。
           case "$PRECISION" in
-            ios-6bit) ATTN=SPLIT_EINSUM; EXTRA="--chunk-unet --quantize-nbits 6" ;;
-            ios-8bit) ATTN=SPLIT_EINSUM; EXTRA="--chunk-unet --quantize-nbits 8" ;;
-            *)        ATTN=ORIGINAL;     EXTRA="" ;;
+            ios-6bit) ATTN=SPLIT_EINSUM; QUANT="--quantize-nbits 6"; CHUNK=1 ;;
+            ios-8bit) ATTN=SPLIT_EINSUM; QUANT="--quantize-nbits 8"; CHUNK=1 ;;
+            *)        ATTN=ORIGINAL;     QUANT="";                   CHUNK=0 ;;
           esac
+          set -e
           python -m python_coreml_stable_diffusion.torch2coreml \
             --model-version ./model_diffusers \
             --custom-vae-version madebyollin/sdxl-vae-fp16-fix \
@@ -110,12 +113,17 @@ jobs:
             --convert-text-encoder --convert-unet --convert-vae-decoder \
             --attention-implementation $ATTN \
             --latent-h $LH --latent-w $LW \
-            $EXTRA \
+            $QUANT \
             -o out
-          # 分割したUnetがあれば、分割前のUnetは不要なので消す
-          if ls -d out/*_unet_chunk1.mlpackage >/dev/null 2>&1; then
-            rm -rf out/*_unet.mlpackage
+          rm -rf model_diffusers/unet model_diffusers/text_encoder model_diffusers/text_encoder_2 model_diffusers/vae
+          if [ "$CHUNK" = "1" ]; then
+            UNET=$(ls -d out/*_unet.mlpackage | head -1)
+            echo "圧縮済みUnetを2つに分割: $UNET"
+            python -m python_coreml_stable_diffusion.chunk_mlprogram \
+              --mlpackage-path "$UNET" -o out --remove-original
+            ls -d out/*_unet_chunk1.mlpackage out/*_unet_chunk2.mlpackage
           fi
+          du -sh out/*
           echo "$ATTN" > out/attention.txt
           cp model_diffusers/tokenizer/vocab.json model_diffusers/tokenizer/merges.txt out/
           ls -la out
