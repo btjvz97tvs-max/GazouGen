@@ -1,0 +1,39 @@
+name: GazouGen
+options:
+  bundleIdPrefix: com.example
+  deploymentTarget:
+    iOS: "17.0"
+packages:
+  StableDiffusion:
+    url: https://github.com/apple/ml-stable-diffusion
+    from: 1.1.0
+targets:
+  GazouGen:
+    type: application
+    platform: iOS
+    sources: [Sources]
+    dependencies:
+      - package: StableDiffusion
+        product: StableDiffusion
+    info:
+      path: Sources/Info.plist
+      properties:
+        CFBundleDisplayName: 画像生成
+        CFBundleShortVersionString: "1.0"
+        CFBundleVersion: "1"
+        UILaunchScreen: {}
+        UIFileSharingEnabled: true
+        LSSupportsOpeningDocumentsInPlace: true
+        NSPhotoLibraryAddUsageDescription: 生成した画像を写真に保存するために使います
+        UISupportedInterfaceOrientations: [UIInterfaceOrientationPortrait]
+    entitlements:
+      path: Sources/GazouGen.entitlements
+      properties:
+        com.apple.developer.kernel.increased-memory-limit: true
+    settings:
+      base:
+        SWIFT_VERSION: "5.0"
+        PRODUCT_BUNDLE_IDENTIFIER: com.example.gazougen
+        TARGETED_DEVICE_FAMILY: "1"
+        CODE_SIGNING_ALLOWED: "NO"
+    scheme: {}
