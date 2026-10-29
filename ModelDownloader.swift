@@ -17,6 +17,14 @@ struct ReleaseInfo: Decodable, Identifiable {
     var title: String { (name?.isEmpty == false ? name! : tag_name) }
 }
 
+extension ReleaseInfo {
+    /// 変換時に付けたモデル名（タイトルの「 (」より前）。インストール先のフォルダ名と同じ
+    var modelName: String {
+        if let n = name, let r = n.range(of: " (") { return String(n[..<r.lowerBound]) }
+        return title
+    }
+}
+
 struct ModelManifest: Decodable {
     let name: String
     let files: [File]
@@ -103,6 +111,36 @@ final class ModelDownloader: ObservableObject {
     private var totalBytes: Int64 = 0
 
     nonisolated static let workDir = AppStore.docs.appendingPathComponent("Downloading", isDirectory: true)
+
+    // MARK: 新しいモデルの自動確認
+
+    /// まだ知らせていない新着モデル
+    @Published var newModels: [ReleaseInfo] = []
+    private static let seenKey = "seenModelTags"
+
+    /// GitHubを静かに確認する（失敗しても何も表示しない）
+    func checkForNew(repo: String, installed: [String]) async {
+        let r = repo.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !r.isEmpty, !isDownloading,
+              let url = URL(string: "https://api.github.com/repos/\(r)/releases?per_page=50") else { return }
+        var req = URLRequest(url: url)
+        req.setValue("application/vnd.github+json", forHTTPHeaderField: "Accept")
+        guard let result = try? await URLSession.shared.data(for: req),
+              (result.1 as? HTTPURLResponse)?.statusCode == 200,
+              let all = try? JSONDecoder().decode([ReleaseInfo].self, from: result.0) else { return }
+        let models = all.filter { $0.tag_name.hasPrefix("model-") && $0.assets.contains { $0.name == "manifest.json" } }
+        releases = models
+        let seen = Set(UserDefaults.standard.stringArray(forKey: Self.seenKey) ?? [])
+        newModels = models.filter { !installed.contains($0.modelName) && !seen.contains($0.tag_name) }
+    }
+
+    /// 知らせ済みにする（同じモデルで何度も通知しない）
+    func markSeen() {
+        var seen = Set(UserDefaults.standard.stringArray(forKey: Self.seenKey) ?? [])
+        for r in newModels { seen.insert(r.tag_name) }
+        UserDefaults.standard.set(Array(seen), forKey: Self.seenKey)
+        newModels = []
+    }
 
     func fetchReleases(repo: String) async {
         let r = repo.trimmingCharacters(in: .whitespacesAndNewlines)

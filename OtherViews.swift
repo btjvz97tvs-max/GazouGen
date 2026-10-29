@@ -129,7 +129,7 @@ struct ModelsView: View {
     @State private var importing = false
     @State private var copying = false
     @State private var errorText: String?
-    @StateObject private var dl = ModelDownloader()
+    @EnvironmentObject var dl: ModelDownloader
     @AppStorage("repo") private var repo = "btjvz97tvs-max/GazouGen"
     @State private var confirm: ReleaseInfo?
 
@@ -153,8 +153,17 @@ struct ModelsView: View {
                             HStack {
                                 Text(r.title).foregroundStyle(.primary)
                                 Spacer()
-                                Text(String(format: "%.1f GB", Double(r.totalSize) / 1e9))
-                                    .font(.caption).foregroundStyle(.secondary)
+                                if store.models.contains(where: { $0.name == r.modelName }) {
+                                    Label("入手済み", systemImage: "checkmark.circle.fill")
+                                        .font(.caption).foregroundStyle(.green)
+                                } else {
+                                    Text("NEW").font(.caption2.bold())
+                                        .padding(.horizontal, 6).padding(.vertical, 2)
+                                        .background(Color.red, in: Capsule())
+                                        .foregroundStyle(.white)
+                                    Text(String(format: "%.1f GB", Double(r.totalSize) / 1e9))
+                                        .font(.caption).foregroundStyle(.secondary)
+                                }
                             }
                         }
                         .disabled(dl.isDownloading)
