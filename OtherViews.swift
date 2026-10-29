@@ -132,6 +132,10 @@ struct ModelsView: View {
     @EnvironmentObject var dl: ModelDownloader
     @AppStorage("repo") private var repo = "btjvz97tvs-max/GazouGen"
     @State private var confirm: ReleaseInfo?
+    @State private var deleting: ModelEntry?
+    @State private var deleteError: String?
+    @State private var sizes: [String: Int64] = [:]
+    @State private var freeSpace: Int64 = 0
 
     var body: some View {
         NavigationStack {
@@ -182,22 +186,37 @@ struct ModelsView: View {
                 } footer: {
                     Text("Wi-Fi接続で、画面を開いたまま待ってください（数GBあります）。")
                 }
-                Section("インストール済み") {
+                Section {
                     if store.models.isEmpty {
                         Text("まだモデルがありません").foregroundStyle(.secondary)
                     }
                     ForEach(store.models) { m in
-                        VStack(alignment: .leading, spacing: 2) {
-                            Text(m.name)
-                            Text(m.isXL ? "SDXL" : "SD 1.5 / 2.x").font(.caption).foregroundStyle(.secondary)
+                        HStack {
+                            VStack(alignment: .leading, spacing: 2) {
+                                Text(m.name)
+                                Text(detail(m)).font(.caption)
+                                    .foregroundStyle(m.isIOSOptimized ? Color.secondary : Color.orange)
+                            }
+                            Spacer()
+                            Button(role: .destructive) {
+                                deleting = m
+                            } label: {
+                                Image(systemName: "trash")
+                            }
+                            .buttonStyle(.borderless)
+                            .disabled(gen.isRunning)
                         }
                     }
                     .onDelete { idx in
-                        guard !gen.isRunning else { return }
-                        gen.unload()
-                        for i in idx { try? FileManager.default.removeItem(at: store.models[i].url) }
-                        store.reloadModels()
+                        if let i = idx.first, i < store.models.count { deleting = store.models[i] }
                     }
+                    if let deleteError {
+                        Text(deleteError).foregroundStyle(.red).font(.footnote)
+                    }
+                } header: {
+                    Text("インストール済み")
+                } footer: {
+                    Text("iPhoneの空き容量：\(gb(freeSpace))。ゴミ箱ボタンか、左にスワイプで削除できます。削除したモデルは、GitHubからもう一度ダウンロードできます。")
                 }
                 Section {
                     Button {
@@ -223,8 +242,9 @@ struct ModelsView: View {
                     dl.download(r, store: store)
                 }
             }
-            .refreshable { store.reloadModels() }
+            .refreshable { store.reloadModels(); await refreshSizes() }
             .onAppear { store.reloadModels() }
+            .task(id: store.models) { await refreshSizes() }
             .fileImporter(isPresented: $importing, allowedContentTypes: [.folder]) { result in
                 guard case .success(let url) = result else { return }
                 copying = true
@@ -236,5 +256,59 @@ struct ModelsView: View {
                 }
             }
         }
+        .confirmationDialog(deleting.map { "「\($0.name)」を削除しますか？" } ?? "",
+                            isPresented: Binding(get: { deleting != nil }, set: { if !$0 { deleting = nil } }),
+                            titleVisibility: .visible,
+                            presenting: deleting) { m in
+            Button("削除する（\(sizes[m.id].map(gb) ?? "容量")が空きます）", role: .destructive) {
+                delete(m)
+            }
+        } message: { _ in
+            Text("あとでGitHubから、もう一度ダウンロードできます。")
+        }
+    }
+
+    private func gb(_ bytes: Int64) -> String {
+        String(format: "%.1f GB", Double(bytes) / 1e9)
+    }
+
+    private func detail(_ m: ModelEntry) -> String {
+        [
+            m.isXL ? "SDXL" : "SD 1.5 / 2.x",
+            m.isIOSOptimized ? "iPhone向け" : "fp16（iPhoneでは重すぎて動きません）",
+            sizes[m.id].map(gb) ?? "容量を計算中…",
+        ].joined(separator: " ・ ")
+    }
+
+    private func delete(_ m: ModelEntry) {
+        guard !gen.isRunning else {
+            deleteError = "生成中は削除できません。終わってからもう一度試してください"
+            return
+        }
+        deleteError = nil
+        gen.unload()   // 読み込み中のモデルをメモリから外してから消す
+        let url = m.url
+        Task {
+            do {
+                try await Task.detached(priority: .userInitiated) {
+                    try FileManager.default.removeItem(at: url)
+                }.value
+            } catch {
+                deleteError = "削除できませんでした：\(error.localizedDescription)"
+            }
+            store.reloadModels()
+            await refreshSizes()
+        }
+    }
+
+    private func refreshSizes() async {
+        let models = store.models
+        let result = await Task.detached(priority: .utility) { () -> ([String: Int64], Int64) in
+            var d: [String: Int64] = [:]
+            for m in models { d[m.id] = AppStore.folderSize(m.url) }
+            return (d, AppStore.freeSpace())
+        }.value
+        sizes = result.0
+        freeSpace = result.1
     }
 }

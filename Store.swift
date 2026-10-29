@@ -15,6 +15,11 @@ struct ModelEntry: Identifiable, Hashable {
     var isXL: Bool {
         FileManager.default.fileExists(atPath: url.appendingPathComponent("TextEncoder2.mlmodelc").path)
     }
+    /// iPhone向けに変換した形式か（fp16 のフル精度モデルは false）
+    var isIOSOptimized: Bool {
+        let a = (try? String(contentsOf: url.appendingPathComponent("attention.txt"), encoding: .utf8)) ?? ""
+        return !a.contains("ORIGINAL")
+    }
 }
 
 @MainActor
@@ -104,6 +109,24 @@ final class AppStore: ObservableObject {
             try fm.copyItem(at: src, to: dst)
         }.value
         reloadModels()
+    }
+
+    /// フォルダの合計サイズ（バイト）
+    nonisolated static func folderSize(_ url: URL) -> Int64 {
+        let keys: [URLResourceKey] = [.totalFileAllocatedSizeKey, .fileSizeKey]
+        guard let e = FileManager.default.enumerator(at: url, includingPropertiesForKeys: keys) else { return 0 }
+        var total: Int64 = 0
+        for case let f as URL in e {
+            let v = try? f.resourceValues(forKeys: Set(keys))
+            total += Int64(v?.totalFileAllocatedSize ?? v?.fileSize ?? 0)
+        }
+        return total
+    }
+
+    /// iPhoneの空き容量（バイト）
+    nonisolated static func freeSpace() -> Int64 {
+        (try? docs.resourceValues(forKeys: [.volumeAvailableCapacityForImportantUsageKey])
+            .volumeAvailableCapacityForImportantUsage) ?? 0
     }
 
     // MARK: 履歴

@@ -242,7 +242,27 @@ final class ModelDownloader: ObservableObject {
             for partName in file.parts {
                 try Task.checkCancellation()
                 guard let asset = assets[partName] else { throw URLError(.fileDoesNotExist) }
-                let tmp = try await downloader.download(asset.browser_download_url)
+                // 通信が途切れても、その部分だけ最大3回までやり直す
+                var downloaded: URL?
+                var lastError: Error?
+                for attempt in 1...3 {
+                    try Task.checkCancellation()
+                    let before = doneBytes
+                    do {
+                        downloaded = try await downloader.download(asset.browser_download_url)
+                        break
+                    } catch is CancellationError {
+                        throw CancellationError()
+                    } catch let e as URLError where e.code == .cancelled {
+                        throw e
+                    } catch {
+                        lastError = error
+                        doneBytes = before
+                        status = "通信エラー。やり直しています（\(attempt)/3）…"
+                        try await Task.sleep(nanoseconds: 3_000_000_000)
+                    }
+                }
+                guard let tmp = downloaded else { throw lastError ?? URLError(.unknown) }
                 try await Task.detached(priority: .utility) {
                     let input = try FileHandle(forReadingFrom: tmp)
                     defer { try? input.close() }
@@ -251,6 +271,13 @@ final class ModelDownloader: ObservableObject {
                     }
                     try FileManager.default.removeItem(at: tmp)
                 }.value
+            }
+            // 組み立てたファイルの大きさが合っているか確認（壊れたまま使わないように）
+            try? out.synchronize()
+            let actual = (try? fm.attributesOfItem(atPath: dest.path)[.size] as? NSNumber)?.int64Value ?? -1
+            if actual != Int64(file.size) {
+                throw NSError(domain: "GazouGen", code: 2, userInfo: [NSLocalizedDescriptionKey:
+                    "ダウンロードしたファイルが壊れています（\(file.path)）。もう一度ダウンロードしてください"])
             }
         }
 

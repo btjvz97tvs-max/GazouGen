@@ -1,4 +1,5 @@
 import Foundation
+import UIKit
 import CoreML
 import CoreGraphics
 import StableDiffusion
@@ -88,9 +89,27 @@ final class Generator: ObservableObject {
 
     private let engine = Engine()
 
+    /// 経過時間つきで表示する作業名（nil のときはステップ表示）
+    private var phaseLabel: String?
+    private var startedAt = Date()
+    private var ticker: Task<Void, Never>?
+
+    private func setPhase(_ label: String?) {
+        phaseLabel = label
+        startedAt = Date()
+        refreshPhaseStatus()
+    }
+
+    private func refreshPhaseStatus() {
+        guard let label = phaseLabel else { return }
+        let sec = Int(Date().timeIntervalSince(startedAt))
+        status = "\(label)… \(sec)秒（画面を開いたままにしてください）"
+    }
+
     func cancel() {
         engine.cancelled = true
-        status = "中止しています…"
+        phaseLabel = nil
+        status = "中止しています…（モデルの読み込み中は、読み込みが終わってから止まります）"
     }
 
     func unload() {
@@ -104,7 +123,17 @@ final class Generator: ObservableObject {
         errorMessage = nil
         progress = 0
         engine.cancelled = false
-        status = "モデルを読み込み中…（初回は数分かかります）"
+        // 生成中に画面が自動ロックされると、iOSに処理を止められるので防ぐ
+        UIApplication.shared.isIdleTimerDisabled = true
+        setPhase("モデルを読み込み中（初回は数分かかります）")
+        ticker?.cancel()
+        ticker = Task { @MainActor [weak self] in
+            while !Task.isCancelled {
+                guard let self, self.isRunning else { break }
+                self.refreshPhaseStatus()
+                try? await Task.sleep(nanoseconds: 1_000_000_000)
+            }
+        }
 
         let engine = self.engine
         let url = model.url
@@ -116,8 +145,10 @@ final class Generator: ObservableObject {
                 for i in 0..<r.count {
                     if engine.cancelled { break }
                     let seed = r.seed &+ UInt32(i)
+                    await MainActor.run { self?.setPhase("\(i + 1)/\(r.count)枚目の準備中") }
                     let img = try engine.generate(r, seed: seed) { step, total in
                         Task { @MainActor in
+                            self?.phaseLabel = nil
                             self?.status = "\(i + 1)/\(r.count)枚目  ステップ \(step)/\(total)"
                             self?.progress = (Double(i) + Double(step) / Double(max(total, 1))) / Double(r.count)
                         }
@@ -144,8 +175,11 @@ final class Generator: ObservableObject {
             }
             await MainActor.run {
                 self?.isRunning = false
+                self?.phaseLabel = nil
+                self?.ticker?.cancel()
                 self?.status = ""
                 self?.progress = 0
+                UIApplication.shared.isIdleTimerDisabled = false
             }
         }
     }
