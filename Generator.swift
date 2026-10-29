@@ -11,6 +11,7 @@ struct GenRequest {
     var seed: UInt32
     var count: Int
     var scheduler: StableDiffusionScheduler
+    var karras: Bool
     var r18: Bool
     var modelName: String
 }
@@ -32,7 +33,9 @@ final class Engine: @unchecked Sendable {
         if loadedPath == model.path, pipeline != nil { return }
         unload()
         let config = MLModelConfiguration()
-        config.computeUnits = .cpuAndNeuralEngine
+        // フル精度モデル（ORIGINAL attention）はGPU、iPhone向け軽量モデルはNeural Engine
+        let attn = (try? String(contentsOf: model.appendingPathComponent("attention.txt"), encoding: .utf8)) ?? ""
+        config.computeUnits = attn.contains("ORIGINAL") ? .cpuAndGPU : .cpuAndNeuralEngine
         let p: any StableDiffusionPipelineProtocol
         if xl {
             p = try StableDiffusionXLPipeline(resourcesAt: model, configuration: config, reduceMemory: true)
@@ -61,6 +64,7 @@ final class Engine: @unchecked Sendable {
         c.seed = seed
         c.imageCount = 1
         c.schedulerType = r.scheduler
+        if r.karras { c.schedulerTimestepSpacing = .karras }
         c.disableSafety = r.r18
         if isXL {
             c.encoderScaleFactor = 0.13025

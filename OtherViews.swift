@@ -129,10 +129,50 @@ struct ModelsView: View {
     @State private var importing = false
     @State private var copying = false
     @State private var errorText: String?
+    @StateObject private var dl = ModelDownloader()
+    @AppStorage("repo") private var repo = "btjvz97tvs-max/GazouGen"
+    @State private var confirm: ReleaseInfo?
 
     var body: some View {
         NavigationStack {
             List {
+                Section {
+                    TextField("ユーザー名/リポジトリ名", text: $repo)
+                        .textInputAutocapitalization(.never)
+                        .autocorrectionDisabled()
+                    Button {
+                        Task { await dl.fetchReleases(repo: repo) }
+                    } label: {
+                        Label(dl.isLoading ? "取得中…" : "変換済みモデルを探す", systemImage: "arrow.down.circle")
+                    }
+                    .disabled(dl.isLoading || dl.isDownloading)
+                    ForEach(dl.releases) { r in
+                        Button {
+                            confirm = r
+                        } label: {
+                            HStack {
+                                Text(r.title).foregroundStyle(.primary)
+                                Spacer()
+                                Text(String(format: "%.1f GB", Double(r.totalSize) / 1e9))
+                                    .font(.caption).foregroundStyle(.secondary)
+                            }
+                        }
+                        .disabled(dl.isDownloading)
+                    }
+                    if dl.isDownloading {
+                        ProgressView(value: dl.progress) { Text(dl.status).font(.footnote) }
+                        Button("中止", role: .destructive) { dl.cancel() }
+                    } else if !dl.status.isEmpty {
+                        Text(dl.status).font(.footnote).foregroundStyle(.secondary)
+                    }
+                    if let e = dl.errorMessage {
+                        Text(e).foregroundStyle(.red).font(.footnote)
+                    }
+                } header: {
+                    Text("GitHubからダウンロード")
+                } footer: {
+                    Text("Wi-Fi接続で、画面を開いたまま待ってください（数GBあります）。")
+                }
                 Section("インストール済み") {
                     if store.models.isEmpty {
                         Text("まだモデルがありません").foregroundStyle(.secondary)
@@ -165,6 +205,15 @@ struct ModelsView: View {
                 }
             }
             .navigationTitle("モデル")
+            .confirmationDialog("このモデルをダウンロードしますか？",
+                                isPresented: Binding(get: { confirm != nil }, set: { if !$0 { confirm = nil } }),
+                                titleVisibility: .visible,
+                                presenting: confirm) { r in
+                Button("ダウンロード（\(String(format: "%.1f GB", Double(r.totalSize) / 1e9))）") {
+                    gen.unload()
+                    dl.download(r, store: store)
+                }
+            }
             .refreshable { store.reloadModels() }
             .onAppear { store.reloadModels() }
             .fileImporter(isPresented: $importing, allowedContentTypes: [.folder]) { result in

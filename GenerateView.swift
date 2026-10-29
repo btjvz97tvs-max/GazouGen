@@ -10,11 +10,11 @@ struct GenerateView: View {
     @AppStorage("prompt") private var prompt = ""
     @AppStorage("negative") private var negative = ""
     @AppStorage("r18") private var r18 = false
-    @AppStorage("steps") private var steps = 25
+    @AppStorage("steps") private var steps = 30
     @AppStorage("cfg") private var cfg = 6.0
     @AppStorage("seedText") private var seedText = "-1"
     @AppStorage("count") private var count = 1
-    @AppStorage("scheduler") private var schedulerKey = "dpm"
+    @AppStorage("scheduler") private var schedulerKey = "dpmk"
 
     @State private var alertMessage: String?
     @State private var viewing: URL?
@@ -58,6 +58,7 @@ struct GenerateView: View {
                         Slider(value: $cfg, in: 1...12, step: 0.5)
                     }
                     Picker("スケジューラ", selection: $schedulerKey) {
+                        Text("DPM++ Karras（高画質）").tag("dpmk")
                         Text("DPM++").tag("dpm")
                         Text("PNDM").tag("pndm")
                     }
@@ -157,6 +158,7 @@ struct GenerateView: View {
             seed: seed,
             count: count,
             scheduler: schedulerKey == "pndm" ? .pndmScheduler : .dpmSolverMultistepScheduler,
+            karras: schedulerKey == "dpmk",
             r18: r18,
             modelName: model.name
         )
