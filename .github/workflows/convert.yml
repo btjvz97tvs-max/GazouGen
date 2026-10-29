@@ -1,0 +1,202 @@
+name: Convert Model
+
+on:
+  workflow_dispatch:
+    inputs:
+      model_url:
+        description: "SDXLモデル(.safetensors)の直リンクURL"
+        required: true
+      name:
+        description: "モデル名（英数字とハイフンのみ）"
+        required: true
+        default: "anime-xl"
+      size:
+        description: "画像サイズ"
+        type: choice
+        options: [portrait-832x1216, square-1024, landscape-1216x832]
+        default: portrait-832x1216
+      precision:
+        description: "精度（fp16=最高画質 / 8bit=軽量）"
+        type: choice
+        options: [fp16, 8bit]
+        default: fp16
+
+permissions:
+  contents: write
+
+jobs:
+  convert:
+    runs-on: ubuntu-latest
+    timeout-minutes: 360
+    steps:
+      - name: Free disk space and add swap
+        run: |
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL /usr/local/share/boost /usr/local/.ghcup || true
+          sudo docker image prune -af >/dev/null 2>&1 || true
+          sudo swapoff -a || true
+          sudo rm -f /swapfile /mnt/swapfile
+          FREE_GB=$(df -BG --output=avail / | tail -1 | tr -dc '0-9')
+          SWAP_GB=$(( FREE_GB - 28 ))
+          if [ $SWAP_GB -gt 32 ]; then SWAP_GB=32; fi
+          if [ $SWAP_GB -lt 8 ]; then SWAP_GB=8; fi
+          sudo fallocate -l ${SWAP_GB}G /swapfile
+          sudo chmod 600 /swapfile
+          sudo mkswap /swapfile
+          sudo swapon /swapfile
+          free -h
+          df -h /
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.10"
+
+      - name: Install converter
+        run: |
+          python -m pip install --upgrade pip
+          pip install torch==2.2.2 --index-url https://download.pytorch.org/whl/cpu
+          pip install "coremltools==7.2" "diffusers==0.27.2" "transformers==4.40.2" \
+            "huggingface_hub==0.23.4" "accelerate==0.30.1" safetensors scipy "numpy<2" omegaconf \
+            pytest invisible-watermark matplotlib "scikit-learn==1.1.2"
+          pip install --no-deps git+https://github.com/apple/ml-stable-diffusion.git@1.1.0
+
+      - name: Download model
+        env:
+          MODEL_URL: ${{ github.event.inputs.model_url }}
+        run: |
+          curl -L --fail --retry 3 -o model.safetensors "$MODEL_URL"
+          ls -lh model.safetensors
+
+      - name: Convert to diffusers format
+        run: |
+          python - <<'EOF'
+          import torch
+          from diffusers import StableDiffusionXLPipeline
+          p = StableDiffusionXLPipeline.from_single_file("model.safetensors", torch_dtype=torch.float16)
+          p.save_pretrained("model_diffusers", variant="fp16")
+          EOF
+          rm -f model.safetensors
+          df -h /
+
+      - name: Convert to Core ML
+        env:
+          SIZE: ${{ github.event.inputs.size }}
+          PRECISION: ${{ github.event.inputs.precision }}
+        run: |
+          case "$SIZE" in
+            portrait-832x1216)  LH=152; LW=104 ;;
+            landscape-1216x832) LH=104; LW=152 ;;
+            *)                  LH=128; LW=128 ;;
+          esac
+          EXTRA=""
+          if [ "$PRECISION" = "8bit" ]; then EXTRA="--quantize-nbits 8"; fi
+          python -m python_coreml_stable_diffusion.torch2coreml \
+            --model-version ./model_diffusers \
+            --custom-vae-version madebyollin/sdxl-vae-fp16-fix \
+            --xl-version \
+            --convert-text-encoder --convert-unet --convert-vae-decoder \
+            --attention-implementation ORIGINAL \
+            --latent-h $LH --latent-w $LW \
+            $EXTRA \
+            -o out
+          cp model_diffusers/tokenizer/vocab.json model_diffusers/tokenizer/merges.txt out/
+          ls -la out
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: mlpackages
+          path: out
+          retention-days: 1
+          compression-level: 0
+
+  package:
+    needs: convert
+    runs-on: macos-15
+    timeout-minutes: 180
+    env:
+      GH_TOKEN: ${{ github.token }}
+      GH_REPO: ${{ github.repository }}
+      NAME: ${{ github.event.inputs.name }}
+      SIZE: ${{ github.event.inputs.size }}
+      PRECISION: ${{ github.event.inputs.precision }}
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: mlpackages
+          path: pkg
+
+      - name: Compile Core ML models
+        run: |
+          set -e
+          mkdir -p "model"
+          comp() {
+            src=$(ls -d pkg/*"$1".mlpackage | head -1)
+            echo "compile $src -> $2"
+            rm -rf tmpc && mkdir tmpc
+            xcrun coremlcompiler compile "$src" tmpc
+            mv tmpc/*.mlmodelc "model/$2.mlmodelc"
+            rm -rf "$src" tmpc
+          }
+          comp _text_encoder TextEncoder
+          comp _text_encoder_2 TextEncoder2
+          comp _unet Unet
+          comp _vae_decoder VAEDecoder
+          cp pkg/vocab.json pkg/merges.txt model/
+          echo ORIGINAL > model/attention.txt
+          du -sh model/*
+
+      - name: Split files and publish release
+        run: |
+          python3 - <<'EOF'
+          import json, os, shutil
+          src, out = "model", "assets"
+          os.makedirs(out)
+          PART = 1900 * 1024 * 1024
+          BLOCK = 64 * 1024 * 1024
+          files = []
+          for root, _, names in os.walk(src):
+              for n in names:
+                  p = os.path.join(root, n)
+                  rel = os.path.relpath(p, src)
+                  flat = rel.replace("/", "__")
+                  size = os.path.getsize(p)
+                  parts = []
+                  if size == 0:
+                      pass
+                  elif size <= PART:
+                      shutil.move(p, os.path.join(out, flat))
+                      parts.append(flat)
+                  else:
+                      with open(p, "rb") as fh:
+                          i = 0
+                          while True:
+                              name = f"{flat}.part{i}"
+                              written = 0
+                              with open(os.path.join(out, name), "wb") as w:
+                                  while written < PART:
+                                      b = fh.read(min(BLOCK, PART - written))
+                                      if not b:
+                                          break
+                                      w.write(b)
+                                      written += len(b)
+                              if written == 0:
+                                  os.remove(os.path.join(out, name))
+                                  break
+                              parts.append(name)
+                              i += 1
+                      os.remove(p)
+                  files.append({"path": rel, "size": size, "parts": parts})
+          manifest = {
+              "format": 1,
+              "name": os.environ["NAME"],
+              "size": os.environ["SIZE"],
+              "precision": os.environ["PRECISION"],
+              "files": files,
+          }
+          with open(os.path.join(out, "manifest.json"), "w") as f:
+              json.dump(manifest, f, ensure_ascii=False, indent=1)
+          print(json.dumps(manifest, indent=1))
+          EOF
+          TAG="model-${NAME}-${PRECISION}-${{ github.run_number }}"
+          gh release create "$TAG" assets/* \
+            --title "${NAME} (${PRECISION}, ${SIZE})" \
+            --notes "GazouGen 用 Core ML モデル。アプリの「モデル」タブからダウンロードしてください。"
