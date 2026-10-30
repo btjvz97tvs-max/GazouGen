@@ -1,0 +1,112 @@
+name: Modal
+
+# 画像生成アプリを Modal（クラウドGPU）で動かす。iPhone / iPad の GitHub から実行できる。
+#  - start : 設定を Modal に送る → （選んだら）モデルを入れる → アプリを公開して URL を表示
+#  - stop  : アプリを止める（もう一度 start すれば再開。モデルと画像は残る）
+#
+# 先に Settings → Secrets and variables → Actions に登録しておくもの
+#   MODAL_TOKEN_ID / MODAL_TOKEN_SECRET … Modal の API トークン（必須）
+#   APP_PASSWORD … アプリのログイン用パスワード（8文字以上・必須）
+#   APP_USER     … ログイン用ユーザー名（なければ me）
+#   CIVITAI_TOKEN / HF_TOKEN … あれば使う（WAI v17 は CIVITAI_TOKEN が必要）
+on:
+  workflow_dispatch:
+    inputs:
+      action:
+        description: "やること（start=起動・更新 / stop=停止）"
+        type: choice
+        options: [start, stop]
+        default: start
+      models:
+        description: "入れるモデル（2回目以降は none でOK）"
+        type: choice
+        options: [both, noobai, wai, none]
+        default: both
+      extra:
+        description: "追加モデル（任意）：Civitai のバージョンID / Hugging Face のリポジトリ名 / 直リンクURL"
+        required: false
+        default: ""
+      gpu:
+        description: "GPU（L4=おすすめ / A10G=少し速い・高い / T4=遅い・安い）"
+        type: choice
+        options: [L4, A10G, T4]
+        default: L4
+
+jobs:
+  modal:
+    runs-on: ubuntu-latest
+    timeout-minutes: 180
+    env:
+      MODAL_TOKEN_ID: ${{ secrets.MODAL_TOKEN_ID }}
+      MODAL_TOKEN_SECRET: ${{ secrets.MODAL_TOKEN_SECRET }}
+      APP_USER: ${{ secrets.APP_USER }}
+      APP_PASSWORD: ${{ secrets.APP_PASSWORD }}
+      CIVITAI_TOKEN: ${{ secrets.CIVITAI_TOKEN }}
+      HF_TOKEN: ${{ secrets.HF_TOKEN }}
+      ACTION: ${{ github.event.inputs.action }}
+      MODELS: ${{ github.event.inputs.models }}
+      EXTRA: ${{ github.event.inputs.extra }}
+      GAZOU_GPU: ${{ github.event.inputs.gpu }}
+      PYTHONIOENCODING: utf-8
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install Modal
+        run: pip install -q "modal>=1.3,<2"
+
+      - name: Check secrets
+        run: |
+          if [ -z "$MODAL_TOKEN_ID" ] || [ -z "$MODAL_TOKEN_SECRET" ]; then
+            echo "::error::Secrets に MODAL_TOKEN_ID と MODAL_TOKEN_SECRET を登録してください"; exit 1
+          fi
+          if [ "$ACTION" = "start" ] && [ ${#APP_PASSWORD} -lt 8 ]; then
+            echo "::error::Secrets に APP_PASSWORD（8文字以上）を登録してください"; exit 1
+          fi
+          modal profile current || true
+
+      - name: Stop
+        if: env.ACTION == 'stop'
+        run: |
+          modal app stop gazougen && echo "### 停止しました（もう一度使うときは start）" >> "$GITHUB_STEP_SUMMARY" \
+            || echo "### もう止まっています" >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Send settings to Modal
+        if: env.ACTION == 'start'
+        run: |
+          modal secret create gazougen-secret \
+            APP_USER="${APP_USER:-me}" \
+            APP_PASSWORD="$APP_PASSWORD" \
+            CIVITAI_TOKEN="${CIVITAI_TOKEN:-none}" \
+            HF_TOKEN="${HF_TOKEN:-none}" \
+            --force > /dev/null
+          echo "設定を送りました"
+
+      - name: Download models
+        if: env.ACTION == 'start' && (env.MODELS != 'none' || env.EXTRA != '')
+        run: modal run modal_app/gazou_modal.py::download --which "$MODELS" --extra "$EXTRA"
+
+      - name: Deploy
+        if: env.ACTION == 'start'
+        run: modal deploy modal_app/gazou_modal.py
+
+      - name: Show URL
+        if: env.ACTION == 'start'
+        run: |
+          python - <<'PY'
+          import os, modal
+          url = modal.Function.from_name("gazougen", "ui").get_web_url()
+          try:
+              vol = modal.Volume.from_name("gazougen-data")
+              models = sorted(e.path.split("/")[-1] for e in vol.listdir("/checkpoints"))
+          except Exception:
+              models = []
+          print("URL:", url)
+          with open(os.environ["GITHUB_STEP_SUMMARY"], "a", encoding="utf-8") as f:
+              f.write(f"## 開くURL\n\n{url}\n\n")
+              f.write(f"GPU: {os.environ.get('GAZOU_GPU', 'L4')}\n\n")
+              f.write("入っているモデル: " + (", ".join(models) or "（なし）") + "\n")
+          PY
