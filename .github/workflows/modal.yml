@@ -37,8 +37,8 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 180
     env:
-      MODAL_TOKEN_ID: ${{ secrets.MODAL_TOKEN_ID }}
-      MODAL_TOKEN_SECRET: ${{ secrets.MODAL_TOKEN_SECRET }}
+      RAW_TOKEN_ID: ${{ secrets.MODAL_TOKEN_ID }}
+      RAW_TOKEN_SECRET: ${{ secrets.MODAL_TOKEN_SECRET }}
       APP_USER: ${{ secrets.APP_USER }}
       APP_PASSWORD: ${{ secrets.APP_PASSWORD }}
       CIVITAI_TOKEN: ${{ secrets.CIVITAI_TOKEN }}
@@ -60,9 +60,15 @@ jobs:
 
       - name: Check secrets
         run: |
-          if [ -z "$MODAL_TOKEN_ID" ] || [ -z "$MODAL_TOKEN_SECRET" ]; then
-            echo "::error::Secrets に MODAL_TOKEN_ID と MODAL_TOKEN_SECRET を登録してください"; exit 1
-          fi
+          # コマンドごと貼った・前後に空白がある・IDとシークレットが逆、でも動くように取り出す
+          ID=$(printf '%s %s' "$RAW_TOKEN_ID" "$RAW_TOKEN_SECRET" | grep -oE 'ak-[A-Za-z0-9]+' | head -1 || true)
+          SEC=$(printf '%s %s' "$RAW_TOKEN_SECRET" "$RAW_TOKEN_ID" | grep -oE 'as-[A-Za-z0-9]+' | head -1 || true)
+          if [ -z "$ID" ]; then echo "::error::MODAL_TOKEN_ID に ak- で始まる値が入っていません"; exit 1; fi
+          if [ -z "$SEC" ]; then echo "::error::MODAL_TOKEN_SECRET に as- で始まる値が入っていません"; exit 1; fi
+          echo "::add-mask::$ID"
+          echo "::add-mask::$SEC"
+          echo "MODAL_TOKEN_ID=$ID" >> "$GITHUB_ENV"
+          echo "MODAL_TOKEN_SECRET=$SEC" >> "$GITHUB_ENV"
           if [ "$ACTION" = "start" ] && [ ${#APP_PASSWORD} -lt 8 ]; then
             echo "::error::Secrets に APP_PASSWORD（8文字以上）を登録してください"; exit 1
           fi
