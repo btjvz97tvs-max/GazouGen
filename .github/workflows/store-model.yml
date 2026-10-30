@@ -1,0 +1,123 @@
+name: Store Model
+
+# .safetensors のモデルファイルを、そのまま GitHub の Releases に保管する。
+# GitHub は 1 ファイル 2GB までなので、1.9GB ごとに分割して置く（取り出すときにつなげ直す）。
+on:
+  workflow_dispatch:
+    inputs:
+      source:
+        description: "どこから取るか（hf=Hugging Face / civitai=Civitai / url=直リンク）"
+        type: choice
+        options: [hf, civitai, url]
+        default: hf
+      target:
+        description: "hf なら『リポジトリ名』、civitai なら『バージョンID（数字）』、url なら『URL』"
+        required: true
+        default: "Laxhar/noobai-XL-Vpred-1.0"
+      file:
+        description: "hf のときのファイル名（空欄なら一番大きい .safetensors を自動で選ぶ）"
+        required: false
+        default: ""
+      name:
+        description: "保管名（英数字とハイフン）"
+        required: true
+        default: "noobai-xl-vpred-1.0"
+
+permissions:
+  contents: write
+
+jobs:
+  store:
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    env:
+      GH_TOKEN: ${{ github.token }}
+      GH_REPO: ${{ github.repository }}
+      SOURCE: ${{ github.event.inputs.source }}
+      TARGET: ${{ github.event.inputs.target }}
+      FILE: ${{ github.event.inputs.file }}
+      NAME: ${{ github.event.inputs.name }}
+      # Civitai から取るときだけ使う（リポジトリの Settings → Secrets に CIVITAI_TOKEN を登録）
+      CIVITAI_TOKEN: ${{ secrets.CIVITAI_TOKEN }}
+      HF_TOKEN: ${{ secrets.HF_TOKEN }}
+    steps:
+      - name: Free disk space
+        run: |
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL /usr/local/share/boost /usr/local/.ghcup || true
+          sudo docker image prune -af >/dev/null 2>&1 || true
+          df -h /
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Download
+        run: |
+          set -e
+          pip install -q "huggingface_hub>=0.23"
+          mkdir -p dl
+          python - <<'PY'
+          import os, re, shutil, urllib.request
+          src, target, file = os.environ["SOURCE"], os.environ["TARGET"].strip(), os.environ.get("FILE", "").strip()
+          hf_token = os.environ.get("HF_TOKEN") or None
+          if src == "hf":
+              from huggingface_hub import HfApi, hf_hub_download
+              if not file:
+                  info = HfApi().model_info(target, files_metadata=True, token=hf_token)
+                  files = [s for s in info.siblings if s.rfilename.endswith(".safetensors") and "/" not in s.rfilename]
+                  if not files:
+                      raise SystemExit(f"{target} に .safetensors が見つかりません")
+                  file = max(files, key=lambda s: s.size or 0).rfilename
+              print("ダウンロード:", target, file)
+              hf_hub_download(target, file, local_dir="dl", token=hf_token)
+          else:
+              if src == "civitai":
+                  token = os.environ.get("CIVITAI_TOKEN")
+                  if not token:
+                      raise SystemExit("リポジトリの Secrets に CIVITAI_TOKEN を登録してください")
+                  urls = [f"https://{h}/api/download/models/{target}?token={token}" for h in ["civitai.com", "civitai.red"]]
+              else:
+                  m = re.search(r"https?://[A-Za-z0-9._~:/?#@!$&()*+,;=%-]+", target)
+                  if not m:
+                      raise SystemExit("URL が正しくありません")
+                  urls = [m.group(0)]
+              for url in urls:
+                  try:
+                      req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
+                      with urllib.request.urlopen(req, timeout=60) as r:
+                          cd = r.headers.get("Content-Disposition", "")
+                          m = re.search(r'filename="?([^";]+)"?', cd)
+                          name = file or (m.group(1) if m else "model.safetensors")
+                          with open(os.path.join("dl", name), "wb") as f:
+                              shutil.copyfileobj(r, f, 16 * 1024 * 1024)
+                      if os.path.getsize(os.path.join("dl", name)) < 1e8:
+                          os.remove(os.path.join("dl", name))
+                          raise RuntimeError("ファイルが小さすぎます（キーやURLを確認）")
+                      print("ダウンロード完了:", name)
+                      break
+                  except Exception as e:
+                      print("失敗:", e)
+              else:
+                  raise SystemExit("ダウンロードできませんでした")
+          PY
+          ls -lh dl
+
+      - name: Split and publish release
+        run: |
+          set -e
+          F=$(ls dl/*.safetensors | head -1)
+          BASE=$(basename "$F")
+          SHA=$(sha256sum "$F" | cut -d' ' -f1)
+          mkdir -p parts
+          split -b 1900M -d -a 2 "$F" "parts/${BASE}.part"
+          ls -lh parts
+          N=$(ls parts | wc -l)
+          cat > notes.md <<EOF
+          元のファイル: \`${BASE}\`（SHA-256: \`${SHA}\`）
+          ${N} 個に分割しています。全部ダウンロードして、番号順につなげると元に戻ります。
+
+          - Windows（コマンドプロンプト）: \`copy /b ${BASE}.part00+${BASE}.part01+... ${BASE}\`
+          - Mac / Linux: \`cat ${BASE}.part* > ${BASE}\`
+          EOF
+          gh release create "file-${NAME}-${{ github.run_number }}" parts/* \
+            --title "モデル保管: ${NAME}" --notes-file notes.md
